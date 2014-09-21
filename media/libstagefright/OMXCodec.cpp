@@ -470,8 +470,11 @@ sp<MediaSource> OMXCodec::Create(
 
 #ifdef QCOM_HARDWARE
     int channelCount = 0;
+    int trackId = 0;
     meta->findInt32(kKeyChannelCount, &channelCount);
-    if (ExtendedCodec::useHWAACDecoder(mime, channelCount) && !createEncoder) {
+    source->getFormat()->findInt32(kKeyTrackID, &trackId);
+    if (ExtendedCodec::useHWAACDecoder(mime, channelCount) && !createEncoder
+            && trackId > 1) {
         findMatchingCodecs(mime, createEncoder,
             "OMX.qcom.audio.decoder.multiaac", flags, &matchingCodecs);
     } else {
@@ -3584,12 +3587,12 @@ void OMXCodec::drainInputBuffers() {
                 continue;
             }
 
+
 #ifdef SEMC_ICS_CAMERA_BLOB
             if (mIsEncoder && mIsVideo && (i == 4)) {
                 break;
             }
 #endif
-
             if (!drainInputBuffer(info)) {
                 break;
             }
@@ -3778,23 +3781,6 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
         }
 
         bool releaseBuffer = true;
-#ifdef OMAP_ENHANCEMENT
-        if (mIsEncoder && (mQuirks & kAvoidMemcopyInputRecordingFrames)) {
-            CHECK(mOMXLivesLocally && offset == 0);
-
-            OMX_BUFFERHEADERTYPE *header =
-                (OMX_BUFFERHEADERTYPE *)info->mBuffer;
-
-            CHECK(header->pBuffer == info->mData);
-
-            header->pBuffer =
-                (OMX_U8 *)srcBuffer->data() + srcBuffer->range_offset();
-
-            releaseBuffer = false;
-            info->mMediaBuffer = srcBuffer;
-        } else {
-#endif
-
         if (mFlags & kStoreMetaDataInVideoBuffers) {
                 releaseBuffer = false;
                 info->mMediaBuffer = srcBuffer;
@@ -3807,6 +3793,7 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
 
                 CHECK(info->mMediaBuffer == NULL);
                 info->mMediaBuffer = srcBuffer;
+
 #ifdef SEMC_ICS_CAMERA_BLOB
         } else if (mIsEncoder && (mQuirks & kXperiaAvoidMemcopyInputRecordingFrames)) {
                 CHECK(mOMXLivesLocally && offset == 0);
@@ -3858,10 +3845,6 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
                     srcBuffer->range_length());
 #endif // USE_SAMSUNG_COLORFORMAT
         }
-
-#ifdef OMAP_ENHANCEMENT
-	}
-#endif
 
         int64_t lastBufferTimeUs;
         CHECK(srcBuffer->meta_data()->findInt64(kKeyTime, &lastBufferTimeUs));
@@ -4558,7 +4541,7 @@ status_t OMXCodec::setFLACFormat(const sp<MetaData> &meta)
 
     CHECK(meta->findInt32(kKeyChannelCount, &numChannels));
     CHECK(meta->findInt32(kKeySampleRate, &sampleRate));
-    //CHECK(meta->findInt32(kKeyBitspersample, &bitsPerSample));
+    CHECK(meta->findInt32(kKeySampleBits, &bitsPerSample));
 
     CODEC_LOGV("Channels: %d, SampleRate: %d",
             numChannels, sampleRate);
@@ -4661,7 +4644,7 @@ status_t OMXCodec::setAPEFormat(const sp<MetaData> &meta)
 
     CHECK(meta->findInt32(kKeyChannelCount, &numChannels));
     CHECK(meta->findInt32(kKeySampleRate, &sampleRate));
-    CHECK(meta->findInt32(kKeyBitspersample, &bitsPerSample));
+    CHECK(meta->findInt32(kKeySampleBits, &bitsPerSample));
 
     CODEC_LOGV("Channels:%d, SampleRate:%d, bitsPerSample:%d",
             numChannels, sampleRate, bitsPerSample);
@@ -4738,7 +4721,7 @@ status_t OMXCodec::setFFmpegAudioFormat(const sp<MetaData> &meta)
     CHECK(meta->findInt32(kKeyCodecId, &codec_id));
     CHECK(meta->findInt32(kKeyChannelCount, &numChannels));
     CHECK(meta->findInt32(kKeyBitRate, &bitRate));
-    CHECK(meta->findInt32(kKeyBitspersample, &bitsPerSample));
+    CHECK(meta->findInt32(kKeySampleBits, &bitsPerSample));
     CHECK(meta->findInt32(kKeySampleRate, &sampleRate));
     CHECK(meta->findInt32(kKeyBlockAlign, &blockAlign));
     CHECK(meta->findInt32(kKeySampleFormat, &sampleFormat));
@@ -4761,6 +4744,7 @@ status_t OMXCodec::setFFmpegAudioFormat(const sp<MetaData> &meta)
 
     err = mOMX->setParameter(
             mNode, OMX_IndexParamAudioFFmpeg, &param, sizeof(param));
+
     return err;
 }
 
@@ -5176,13 +5160,16 @@ status_t OMXCodec::read(
             mPaused = false;
         }
 
+        if (mQuirks & kRequiresFlushCompleteEmulation)
+            drainInputBuffers();
 
         if (mState == EXECUTING) {
             // Otherwise mState == RECONFIGURING and this code will trigger
             // after the output port is reenabled.
             fillOutputBuffers();
         }
-        drainInputBuffers();
+        if (!(mQuirks & kRequiresFlushCompleteEmulation))
+            drainInputBuffers();
     }
 
     if (seeking) {
@@ -6028,13 +6015,14 @@ status_t OMXCodec::pause() {
     CODEC_LOGV("pause mState=%d", mState);
 
     Mutex::Autolock autoLock(mLock);
-    if (mState != EXECUTING) {
-        return UNKNOWN_ERROR;
-    }
-    while (isIntermediateState(mState)) {
-        mAsyncCompletion.wait(mLock);
-    }
     if (!strncmp(mComponentName, "OMX.qcom.", 9) && !mIsEncoder) {
+        if (mState != EXECUTING) {
+            return UNKNOWN_ERROR;
+        }
+        while (isIntermediateState(mState)) {
+            mAsyncCompletion.wait(mLock);
+        }
+
         status_t err = mOMX->sendCommand(mNode,
             OMX_CommandStateSet, OMX_StatePause);
         CHECK_EQ(err, (status_t)OK);
