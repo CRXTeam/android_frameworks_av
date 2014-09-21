@@ -519,7 +519,7 @@ void ExtendedUtils::helper_addMediaCodec(Vector<MediaCodecList::CodecInfo> &mCod
     info->mIsEncoder = encoder;
     info->mTypes=0;
     ssize_t index = mTypes.indexOfKey(type);
-    uint32_t bit;
+    uint64_t bit;
     if(index < 0) {
          bit = mTypes.size();
          if (bit == 64) {
@@ -616,6 +616,10 @@ int32_t ExtendedUtils::getEncoderTypeFlags() {
 
 void ExtendedUtils::prefetchSecurePool(const char *uri)
 {
+    if (!uri) {
+        return;
+    }
+
     if (!strncasecmp("widevine://", uri, 11)) {
         ALOGV("Widevine streaming content\n");
         createSecurePool();
@@ -1007,3 +1011,20 @@ void ExtendedUtils::parseRtpPortRangeFromSystemProperty(unsigned *start, unsigne
 
 }
 #endif //ENABLE_AV_ENHANCEMENTS
+
+#if defined(ENABLE_AV_ENHANCEMENTS) || defined(ENABLE_OFFLOAD_ENHANCEMENTS)
+namespace android {
+
+void ExtendedUtils::updateOutputBitWidth(sp<MetaData> format, bool isOffload) {
+    char value[PROPERTY_VALUE_MAX] = {0};
+    property_get("audio.offload.24bit.enable", value, "0");
+    int32_t bitWidth = 16;
+    if (format->findInt32(kKeySampleBits, &bitWidth)) {
+        if (!((bitWidth == 24) && isOffload && atoi(value))) {
+            format->setInt32(kKeySampleBits, 16);
+        }
+    }
+}
+
+}
+#endif
